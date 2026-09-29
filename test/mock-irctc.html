@@ -12,13 +12,15 @@
   .css-checkbox:checked + .css-label_c::before { background: #1976d2; }
   .ui-autocomplete-panel { border: 1px solid #888; }
   .bank-type { border: 1px solid #ccc; margin: 4px; padding: 6px; cursor: pointer; }
-  .bank-type.active { background: #def; }
+  .bank-type.bank-type-active { background: #def; }
 </style>
 </head>
 <body>
 <!-- Local stand-in for IRCTC's train list → passenger → review → payment pages. The name box copies the saved page
      in manual_flow/ and PrimeNG's AutoComplete as IRCTC's bundle uses it.
-     Scenarios: ?flow ?captcha ?slowlist ?prompt ?limit ?confirm ?waitlist ?notfound ?untrusted ?off -->
+     The payment and eWallet pages copy the saved pages in manual_flow/ and IRCTC's code for them.
+     Scenarios: ?flow ?captcha ?slowlist ?prompt ?limit ?confirm ?waitlist ?pay ?otp ?lowbalance ?paybank ?notfound
+     ?untrusted ?off -->
 <app-root><app-home><div id="view"></div></app-home></app-root>
 
 <template id="train-list">
@@ -75,11 +77,39 @@
 
 <template id="payment">
   <app-payment-options><div><div><div><app-payment><div><div><form><div><span>
-    <div class="bank-type"><div>Multiple Payment Service</div></div>
-    <div class="bank-type"><div>BHIM/ UPI/ USSD</div></div>
-    <div class="bank-type"><div>E-Wallet (Instant Payment)</div></div>
-  </span></div></form></div></div></app-payment></div></div></div>
-  <button type="button" id="pay-book">Pay &amp; Book</button></app-payment-options>
+    <div tabindex="0" class="bank-type col-xs-12"><img alt="" class="bank-img"><span class="col-pad">Multiple Payment Service</span></div>
+    <div tabindex="0" class="bank-type col-xs-12"><img alt="" class="bank-img"><span class="col-pad">BHIM/ UPI/ USSD</span></div>
+    <div tabindex="0" class="bank-type col-xs-12"><img alt="" class="bank-img"><div><span class="pull-left">E-Wallet<span> (Instant Payment)</span></span><br><span class="pull-left">Balance: ₹5,000.25</span></div></div>
+  </span></div>
+    <!-- IRCTC's phone layout has its own Pay & Book in a bottom sidebar, hidden on a computer. -->
+    <p-sidebar class="hidden-lg hidden-md hidden-sm" style="display: none;"><div class="text-center bottom-btn"><div class="pull-right">
+      <button type="button" class="mob-bot-btn search_btn" id="pay-book-phone">Pay &amp; Book </button></div></div></p-sidebar>
+  </form></div></div>
+  <div class="row body_div text-center"><button type="button" value="Back" class="btnDefault">Back</button><button type="button" class="btn btn-primary hidden-xs" id="pay-book">Pay &amp; Book </button></div>
+  </app-payment></div></div></div></app-payment-options>
+</template>
+
+<template id="ewallet-confirm">
+  <app-ewallet-confirm>
+    <p-toast><div class="ui-toast ui-widget ui-toast-top-right"></div></p-toast>
+    <div class="col-xs-12 col-sm-6 border-all col-sm-push-3">
+      <div class="inputBoxPad col-xs-12"><span class="pull-left">User Name</span><span class="pull-right">mockuser</span></div>
+      <div class="inputBoxPad col-xs-12"><span class="pull-left">Current IRCTC eWallet Balance</span><span class="pull-right">₹ 5000.25</span></div>
+      <div class="inputBoxPad col-xs-12"><span class="pull-left">*Amount to deduct</span><span class="pull-right">₹ 2,510.00</span></div>
+      <div class="inputBoxPad col-xs-12"><span class="pull-left">Remaining Balance</span><span class="pull-right">₹ 2,490.25</span></div>
+      <div class="inputBoxPad col-xs-12"><span>Note: An amount of ₹ 10 + Applicable GST will be deducted as IRCTC eWallet service charge.</span></div>
+      <div class="inputBoxPad col-sm-4 col-xs-12" id="otp-area"><input type="number" minlength="1" maxlength="8" autocomplete="off" class="form-control" placeholder="Enter OTP"></div>
+      <div class="col-xs-12"><div class="text-center">
+        <div class="pull-left" style="width: 49.9%;"><button type="button" class="mob-bot-btn search_btn" id="wallet-confirm"> CONFIRM </button></div>
+        <div class="pull-right" style="width: 49.9%;"><button type="button" class="mob-bot-btn search_btn" id="wallet-cancel">Cancel</button></div>
+      </div></div>
+    </div>
+    <p-dialog></p-dialog>
+  </app-ewallet-confirm>
+</template>
+
+<template id="ewallet-response">
+  <app-ewallet-response><div>Booking confirmed. PNR 1234567890</div></app-ewallet-response>
 </template>
 
 <script>
@@ -95,12 +125,14 @@
   const FAMILY = ['Ravi Kumar Mohan Verma', 'meena ravi kumar verma', 'Asha Ravi Kumar Verma'];
   const profile = {
     passengers: (NAMES[scenario] || FAMILY).map((name) => ({ name })),
-    paymentOption: 'E-Wallet',
+    paymentOption: scenario === 'paybank' ? 'Multiple Payment Service' : 'E-Wallet',
     confirmOnly: scenario === 'confirm' || scenario === 'waitlist',
   };
 
-  // Stands in for the extension's storage API.
-  const stored = { profile, armed: scenario !== 'off' };
+  // Stands in for the extension's storage API. "Complete payment" starts on in the payment scenarios, and in
+  // ?captcha, where the test turns it off mid-run.
+  const PAYING = ['pay', 'otp', 'lowbalance', 'paybank', 'captcha'];
+  const stored = { profile, armed: scenario !== 'off', completePayment: PAYING.includes(scenario) };
   window.chrome = window.chrome || {};
   chrome.storage = {
     local: {
@@ -111,7 +143,10 @@
   };
 
   // Stand-in for Angular: the "model" only changes through the page's own handlers.
-  const model = { rows: [], choices: {}, timeline: {}, captcha: null, captchaError: false, payment: null, payClicked: false };
+  const model = {
+    rows: [], choices: {}, timeline: {}, captcha: null, captchaError: false, payment: null,
+    payClicks: [], confirmClicks: 0, cancelClicked: false, loggedOut: false,
+  };
   const mark = (key) => { model.timeline[key] ??= Math.round(performance.now()); };
   const view = document.getElementById('view');
   const render = (id) => view.replaceChildren(document.getElementById(id).content.cloneNode(true));
@@ -143,12 +178,21 @@
     });
   }
 
-  function showToast(summary, detail) {
+  function showToast(summary, detail, severity = 'error') {
     const toast = document.createElement('p-toast');
-    toast.innerHTML = `<div class="ui-toast ui-toast-top-right"><div class="ui-toast-message ui-toast-message-error">`
+    toast.innerHTML = `<div class="ui-toast ui-toast-top-right"><div class="ui-toast-message ui-shadow ui-toast-message-${severity}">`
       + `<div class="ui-toast-summary">${summary}</div><div class="ui-toast-detail">${detail}</div></div></div>`;
     document.body.append(toast);
     setTimeout(() => toast.remove(), 5000);
+  }
+
+  // IRCTC's loading screen over the page for a while.
+  function showLoading(ms, then) {
+    const loading = document.createElement('div');
+    loading.className = 'my-loading';
+    loading.innerHTML = '<div class="dimmer"><div class="loading-bg"><div id="preloaderP"><div id="loaderP">Loading</div></div></div></div>';
+    document.body.append(loading);
+    setTimeout(() => { loading.remove(); then(); }, ms);
   }
 
   function showPassengers() {
@@ -157,13 +201,7 @@
     render('passenger-input');
     addRow();
     // ?prompt: IRCTC's loading screen stays over the page for a moment.
-    if (scenario === 'prompt') {
-      const loading = document.createElement('div');
-      loading.className = 'my-loading';
-      loading.innerHTML = '<div class="dimmer"><div class="loading-bg"><div id="preloaderP"><div id="loaderP">Loading</div></div></div></div>';
-      document.body.append(loading);
-      setTimeout(() => { loading.remove(); mark('loaderGone'); }, 800);
-    }
+    if (scenario === 'prompt') showLoading(800, () => mark('loaderGone'));
     // IRCTC's markup; like the real page, the link shows up a moment after the first name box.
     setTimeout(() => {
       document.getElementById('add-area').innerHTML = '<div class="zeroPadding pull-left"><a tabindex="0">'
@@ -289,15 +327,57 @@
 
   function showPayment() {
     render('payment');
+    const payBook = document.getElementById('pay-book');
+    payBook.hidden = true; // IRCTC shows it once an option is chosen
+    let chosen = null;
     for (const tile of view.querySelectorAll('.bank-type')) {
       tile.addEventListener('click', () => {
-        view.querySelectorAll('.bank-type').forEach((t) => t.classList.toggle('active', t === tile));
-        model.payment = tile.textContent.trim();
+        view.querySelectorAll('.bank-type').forEach((t) => t.classList.toggle('bank-type-active', t === tile));
+        chosen = tile.querySelector('.pull-left, .col-pad').textContent.trim();
+        model.payment = chosen;
+        payBook.hidden = false;
         mark('paymentSelected');
       });
     }
-    document.getElementById('pay-book').addEventListener('click', () => { model.payClicked = true; });
+    // IRCTC's payNow() → makePayment(): the loading screen while its server starts the payment, then an info message
+    // and the eWallet confirmation page, or an error message on this page.
+    for (const button of view.querySelectorAll('#pay-book, #pay-book-phone')) {
+      button.addEventListener('click', () => {
+        model.payClicks.push(button.id);
+        mark('payBook');
+        showLoading(500, () => {
+          if (scenario === 'lowbalance') return showToast('Error', 'Insufficient balance in your IRCTC eWallet.');
+          if (!chosen?.startsWith('E-Wallet')) return mark('bankRedirect');
+          showToast('Info', 'Please do not refresh or press the back button.', 'info');
+          showWalletConfirm();
+        });
+      });
+    }
     mark('paymentShown');
+  }
+
+  // IRCTC's app-ewallet-confirm: its keydown listener counts keys typed into number boxes. With an OTP box, its
+  // onConfirm() logs you out unless at least 3 were typed. Otherwise it verifies the payment under the loading
+  // screen (IRCTC holds it until its minimum payment time has passed) and opens the booking result.
+  function showWalletConfirm() {
+    render('ewallet-confirm');
+    if (scenario !== 'otp') document.getElementById('otp-area').remove();
+    let typed = 0;
+    view.querySelector('app-ewallet-confirm').addEventListener('keydown', (e) => { if (e.target.type === 'number') typed++; });
+    document.getElementById('wallet-confirm').addEventListener('click', () => {
+      model.confirmClicks++;
+      mark('walletConfirm');
+      if (scenario === 'otp' && typed < 3) {
+        model.loggedOut = true;
+        return view.replaceChildren('Logged out');
+      }
+      showLoading(600, () => {
+        render('ewallet-response');
+        mark('booked');
+      });
+    });
+    document.getElementById('wallet-cancel').addEventListener('click', () => { model.cancelClicked = true; });
+    mark('walletShown');
   }
 
   showTrainList();

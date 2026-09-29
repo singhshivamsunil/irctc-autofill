@@ -148,6 +148,7 @@ try {
     expect('flow: panel shows it is on and waiting', idle.includes('On: waiting for you to click Book Now'));
     expect('flow: panel lists the saved names', idle.includes('Ravi Kumar Mohan Verma') && idle.includes('Asha Ravi Kumar Verma'));
     expect('flow: panel shows confirm berths is off', idle.includes('Book only if confirm berths are allotted: Off'));
+    expect('flow: Complete payment switch is off', !(await evaluate(client, `${PANEL}.querySelector('.pay').checked`)));
     await click(client, BOOK_NOW);
     await reachedPayment(client);
     const m = await model(client);
@@ -159,7 +160,7 @@ try {
     expect('flow: pressed review Continue', 'reviewContinue' in m.timeline);
     expect('flow: selected E-Wallet', m.payment === 'E-Wallet (Instant Payment)');
     await sleep(500);
-    expect('flow: did not press Pay & Book', !(await model(client)).payClicked);
+    expect('flow: did not press Pay & Book', !(await model(client)).payClicks.length);
     const end = await panelText(client);
     expect('flow: panel says your turn to pay', end.includes('Your turn'));
     expect('flow: panel says the box wasn\'t ticked on IRCTC', end.includes('Book only if confirm berths are allotted: not ticked on IRCTC'));
@@ -170,6 +171,7 @@ try {
   });
 
   // Review page with a captcha: it waits in the captcha box; the person types it and presses Enter.
+  // Complete payment starts on here, and the person turns it off while typing the captcha.
   await scenario(client, 'captcha', async () => {
     await click(client, BOOK_NOW);
     const focused = await waitUntil(client, "document.activeElement?.id === 'captcha'");
@@ -177,11 +179,16 @@ try {
     expect('captcha: cursor put in captcha box', focused);
     expect('captcha: did not press Continue itself', !('reviewContinue' in m.timeline) && m.captcha === null);
     expect('captcha: says to type it', (await panelText(client)).includes('Type the captcha'));
+    await click(client, `${PANEL}.querySelector('.pay')`);
+    await click(client, "document.getElementById('captcha')");
     await typeAndEnter(client, 'X7K2P');
     await reachedPayment(client);
+    await sleep(500);
     m = await model(client);
     expect('captcha: typed text submitted as is', m.captcha === 'X7K2P' && !m.captchaError);
-    expect('captcha: then selected E-Wallet', m.payment === 'E-Wallet (Instant Payment)' && !m.payClicked);
+    expect('captcha: then selected E-Wallet', m.payment === 'E-Wallet (Instant Payment)');
+    expect('captcha: Complete payment turned off mid-run: saved, and no Pay & Book',
+      (await evaluate(client, 'mock.stored.completePayment')) === false && !m.payClicks.length);
   });
 
   // Master list still loading when the passenger page appears: keeps reopening the dropdown until it's there.
@@ -213,7 +220,7 @@ try {
     await reachedPayment(client);
     m = await model(client);
     expectFamily('prompt', m.rows);
-    expect('prompt: then carried on to payment', m.payment === 'E-Wallet (Instant Payment)' && !m.payClicked);
+    expect('prompt: then carried on to payment', m.payment === 'E-Wallet (Instant Payment)' && !m.payClicks.length);
   });
 
   // IRCTC won't add a third row: the panel passes on IRCTC's message, and it doesn't press Continue.
@@ -253,6 +260,57 @@ try {
     expect('waitlist: did not press Continue', !('passengerContinue' in m.timeline));
   });
 
+  // Complete payment on: after E-Wallet it presses Pay & Book, then CONFIRM on IRCTC's eWallet page, once each.
+  await scenario(client, 'pay', async () => {
+    await waitUntil(client, `${PANEL}.querySelector('.pay').checked`);
+    await click(client, BOOK_NOW);
+    await waitUntil(client, "'booked' in mock.model.timeline", 15000);
+    await sleep(500);
+    const m = await model(client);
+    expectFamily('pay', m.rows);
+    expect('pay: selected E-Wallet, then pressed the visible Pay & Book once', m.payment === 'E-Wallet (Instant Payment)'
+      && m.timeline.paymentSelected <= m.timeline.payBook && m.payClicks.join() === 'pay-book');
+    expect('pay: pressed CONFIRM once, not Cancel', m.confirmClicks === 1 && !m.cancelClicked);
+    expect('pay: booking went through', 'booked' in m.timeline);
+    expect('pay: panel says it pressed CONFIRM, with the amount',
+      (await panelText(client)).includes('Pressed CONFIRM to pay ₹ 2,510.00 from your eWallet'));
+    const t = m.timeline;
+    timings.push(['payment page shown → Pay & Book pressed', t.payBook - t.paymentShown]);
+    timings.push(['eWallet page shown → CONFIRM pressed', t.walletConfirm - t.walletShown]);
+  });
+
+  // IRCTC wants an OTP: CONFIRM without typing it would log you out, so it leaves CONFIRM to you.
+  await scenario(client, 'otp', async () => {
+    await click(client, BOOK_NOW);
+    const focused = await waitUntil(client, "document.activeElement?.type === 'number'", 15000);
+    await sleep(500);
+    const m = await model(client);
+    expect('otp: pressed Pay & Book, then put the cursor in the OTP box', m.payClicks.length === 1 && focused);
+    expect('otp: did not press CONFIRM (so no logout)', m.confirmClicks === 0 && !m.loggedOut);
+    expect('otp: says to type the OTP', (await panelText(client)).includes('IRCTC wants an OTP: type it, then press CONFIRM'));
+  });
+
+  // IRCTC refuses after Pay & Book (not enough balance): the panel passes on IRCTC's message, and it stops.
+  await scenario(client, 'lowbalance', async () => {
+    await click(client, BOOK_NOW);
+    await waitUntil(client, `${PANEL}.querySelector('.log').textContent.includes('Insufficient')`, 15000);
+    await sleep(500);
+    const m = await model(client);
+    expect('lowbalance: pressed Pay & Book once', m.payClicks.length === 1);
+    expect("lowbalance: shows IRCTC's message", (await panelText(client)).includes('Error Insufficient balance in your IRCTC eWallet.'));
+    expect('lowbalance: nothing pressed after that', !('walletShown' in m.timeline) && m.confirmClicks === 0);
+  });
+
+  // Complete payment only pays by E-Wallet: with another option saved, it selects that and stops before Pay & Book.
+  await scenario(client, 'paybank', async () => {
+    await click(client, BOOK_NOW);
+    await reachedPayment(client);
+    await sleep(500);
+    const m = await model(client);
+    expect('paybank: selected the saved option, no Pay & Book', m.payment === 'Multiple Payment Service' && !m.payClicks.length);
+    expect('paybank: says it only pays by E-Wallet', (await panelText(client)).includes('only pays by E-Wallet'));
+  });
+
   // A name that isn't in the master list: nothing to select, so it stops before Continue.
   await scenario(client, 'notfound', async () => {
     await click(client, BOOK_NOW);
@@ -285,6 +343,9 @@ try {
     await sleep(200);
     expect('off: switch turns it on and saves that', (await evaluate(client, 'mock.stored.armed')) === true
       && (await panelText(client)).includes('On: waiting for you to click Book Now'));
+    await click(client, `${PANEL}.querySelector('.pay')`);
+    await sleep(200);
+    expect('off: Complete payment switch turns on and saves that', (await evaluate(client, 'mock.stored.completePayment')) === true);
   });
 
   client.close();

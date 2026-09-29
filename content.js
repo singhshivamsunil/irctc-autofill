@@ -1,9 +1,10 @@
 // Takes an IRCTC booking from the moment you click Book Now to the payment page:
 //   passenger details: selects each saved name from the master list dropdown, then presses Continue
 //   review journey:    presses Continue, or puts the cursor in the captcha box for you to type
-//   payment:           selects your payment option
-// A panel on the right of every IRCTC page has the on/off switch and shows what it's doing.
-// It never types a captcha, never sends a request again, and never presses Pay & Book.
+//   payment:           selects your payment option; with "Complete payment" on and E-Wallet, presses Pay & Book
+//   eWallet confirm:   with "Complete payment" on, presses CONFIRM, unless IRCTC asks for an OTP
+// A panel on the right of every IRCTC page has the switches and shows what it's doing.
+// It never types a captcha or OTP, never answers IRCTC's prompts, and presses each payment button at most once.
 (() => {
   const VERSION = globalThis.chrome?.runtime?.getManifest?.().version ?? 'test';
   const WAIT_FOR_IRCTC = 10 * 60 * 1000; // how long each page may take to arrive before giving up
@@ -12,6 +13,8 @@
     addPassenger: 'add passenger',
     bookNow: 'book now',
     continue: 'continue',
+    payBook: 'pay & book',
+    confirm: 'confirm',
   };
 
   // IRCTC's address for each page (from its router). Only checked on the live site: the local test page is a file.
@@ -19,6 +22,7 @@
     passenger: '/nget/booking/psgninput',
     review: '/nget/booking/reviewBooking',
     payment: '/nget/payment/bkgPaymentOptions',
+    wallet: '/nget/payment/ewallet-confirm',
   };
   const onPath = (stage) => location.protocol !== 'https:' || location.pathname.startsWith(PATHS[stage]);
 
@@ -200,6 +204,10 @@
   // IRCTC's pop-up messages (PrimeNG toasts), e.g. when it won't add another passenger.
   const toasts = () => [...document.querySelectorAll('.ui-toast-message, .p-toast-message')].filter(visible)
     .map((t) => t.innerText.replace(/\s+/g, ' ').trim()).join(' / ');
+  // Only its error messages (PrimeNG adds ui-toast-message-error). It also shows an info message on the way to the
+  // eWallet page, which isn't a problem.
+  const errorToasts = () => [...document.querySelectorAll('.ui-toast-message-error, .p-toast-message-error')].filter(visible)
+    .map((t) => t.innerText.replace(/\s+/g, ' ').trim()).join(' / ');
 
   const rowCounts = () => `${document.querySelectorAll('app-passenger').length} app-passenger, ${nameBoxes().length} name boxes`;
 
@@ -312,19 +320,89 @@
     return byText(wanted, 'div, span, label, li', page).find((el) => !el.closest('button'));
   }
 
+  // A payment tile's lines, e.g. "E-Wallet (Instant Payment) · Balance: ₹5,000.25".
+  const optionName = (el) => el.innerText.split('\n').map((line) => line.trim()).filter(Boolean).join(' · ');
+  const isWallet = (text) => /\be-?wallet/.test(norm(text));
+
+  // Pay & Book and CONFIRM: each button is pressed at most once, so a payment is never sent twice.
+  const pressed = new WeakSet();
+  function press(button, what) {
+    if (pressed.has(button)) return false;
+    pressed.add(button);
+    button.click();
+    note(`pressed ${what}`);
+    return true;
+  }
+
+  // IRCTC's Pay & Book is <button class="btn btn-primary hidden-xs" (click)="payNow()">, shown once an option is
+  // chosen. Its copy for phones is in a bottom sidebar that's hidden on a computer.
+  const payBookButton = (page) => [...page.querySelectorAll('button')]
+    .find((b) => visible(b) && !b.disabled && norm(b.textContent) === TEXT.payBook);
+
+  // Selects the payment option. With "Complete payment" on and E-Wallet chosen, also presses Pay & Book, after which
+  // IRCTC opens its eWallet confirmation page. Returns [report, next page or null].
   async function payment(profile) {
     const page = document.querySelector('app-payment-options') || document;
     const option = await waitFor(() => paymentOption(page, profile.paymentOption), 10000);
     if (!option) {
-      return { title: 'Pick the payment option yourself', problems: [`"${profile.paymentOption}" not found on the payment page.`] };
+      return [{ title: 'Pick the payment option yourself', problems: [`"${profile.paymentOption}" not found on the payment page.`] }, null];
     }
     option.click();
-    note(`selected ${option.textContent.trim()}`);
-    return { title: 'Done. Your turn: check the fare and pay', done: [`Selected ${option.textContent.trim()}`] };
+    const name = optionName(option);
+    note(`selected ${name}`);
+    const done = [`Selected ${name}`];
+    if (!saved.completePayment) return [{ title: 'Done. Your turn: check the fare and pay', done }, null];
+
+    const yourTurn = (problem) => [{ title: 'Your turn: check the fare and pay', done, problems: [problem] }, null];
+    if (!isWallet(name)) return yourTurn(`Complete payment only pays by E-Wallet, so it didn't press Pay & Book for "${name}".`);
+    // IRCTC marks the chosen tile bank-type-active.
+    const chosen = () => [...page.querySelectorAll('.bank-type.bank-type-active')].some((t) => visible(t) && isWallet(t.textContent));
+    if (!(await waitFor(chosen, 2000))) return yourTurn("IRCTC didn't show E-Wallet as chosen, so it didn't press Pay & Book.");
+    if (!(await whenClear())) return yourTurn("A prompt or loading screen stayed on the page, so it didn't press Pay & Book.");
+    // An error already on screen would be mistaken for IRCTC's answer to Pay & Book.
+    const error = errorToasts();
+    if (error) return yourTurn(`IRCTC shows an error, so it didn't press Pay & Book: ${error}`);
+    const button = await waitFor(() => payBookButton(page), 5000);
+    if (!button) return yourTurn('Pay & Book button not found.');
+    if (!press(button, 'Pay & Book')) return yourTurn("It already pressed Pay & Book on this page, so it didn't press it again.");
+    done.push('Pressed Pay & Book');
+    return [{ title: 'Pressed Pay & Book. Waiting for IRCTC…', done }, 'wallet'];
+  }
+
+  // IRCTC's eWallet confirmation page (app-ewallet-confirm): balance and amount rows, then CONFIRM and Cancel (both
+  // button.mob-bot-btn), plus an OTP box when IRCTC wants one. With the OTP box, IRCTC's CONFIRM logs you out unless
+  // at least 3 keys were typed on the page, so that case is left to you.
+  const walletPage = () => document.querySelector('app-ewallet-confirm');
+  const confirmButton = () => [...(walletPage()?.querySelectorAll('button') || [])]
+    .find((b) => visible(b) && !b.disabled && norm(b.textContent) === TEXT.confirm);
+  const walletRow = (label) => [...(walletPage()?.querySelectorAll('.inputBoxPad') || [])]
+    .find((row) => norm(row.querySelector('.pull-left')?.textContent).includes(label))
+    ?.querySelector('.pull-right')?.textContent.replace(/\s+/g, ' ').trim();
+
+  async function walletConfirm() {
+    const amount = walletRow('amount to deduct') || 'the amount';
+    if (!saved.completePayment) return { title: 'Complete payment is off. Your turn: press CONFIRM or Cancel' };
+    const otp = [...walletPage().querySelectorAll('input')].find(visible);
+    if (otp) {
+      otp.scrollIntoView({ block: 'center' });
+      otp.focus();
+      note('eWallet page asks for an OTP: waiting for you');
+      return { title: 'IRCTC wants an OTP: type it, then press CONFIRM yourself' };
+    }
+    const stopped = (problem) => ({ title: "Didn't press CONFIRM", problems: [problem] });
+    if (!(await whenClear())) return stopped('A prompt or loading screen stayed on the page.');
+    const button = confirmButton();
+    if (!button) return stopped('CONFIRM button not found on the eWallet page.');
+    if (!press(button, `CONFIRM (${amount})`)) return stopped("It already pressed CONFIRM on this page, so it didn't press it again.");
+    return {
+      title: 'Pressed CONFIRM. IRCTC is booking your ticket; the result shows on this page',
+      done: [`Pressed CONFIRM to pay ${amount} from your eWallet`],
+    };
   }
 
   // Each page: when it's on screen, and what to do there. run() returns [report, next page or null].
-  // advance() also holds off while blocker() finds a prompt or the loading screen.
+  // advance() also holds off while blocker() finds a prompt or the loading screen. While a page is awaited, its
+  // failed(), if it has one, returns IRCTC's error message, which ends the run.
   const STEPS = {
     passenger: {
       ready: () => onPath('passenger') && nameBoxes().length > 0,
@@ -342,7 +420,13 @@
     },
     payment: {
       ready: () => onPath('payment') && !!document.querySelector('app-payment-options'),
-      run: async (profile) => [await payment(profile), null],
+      run: payment,
+    },
+    wallet: {
+      ready: () => onPath('wallet') && !!confirmButton(),
+      // After Pay & Book, IRCTC may show an error and stay on the payment page (not enough balance, say).
+      failed: errorToasts,
+      run: async () => [await walletConfirm(), null],
     },
   };
 
@@ -355,7 +439,7 @@
   function begin(stage) {
     trace = [];
     traceStart = performance.now();
-    note(`started on the ${stage} page`);
+    note(`started on the ${stage} page, complete payment ${saved.completePayment ? 'on' : 'off'}`);
     panel.clearLog();
     panel.confirm(saved.profile.confirmOnly ? 'on' : 'off');
     start(stage, saved.profile);
@@ -398,7 +482,15 @@
     if (!flow || busy) return;
     const reason = blocker();
     panel.blocked(reason);
-    if (reason || !STEPS[flow.stage].ready()) return;
+    if (reason) return;
+    const error = STEPS[flow.stage].failed?.();
+    if (error) {
+      note(`IRCTC says: ${error}`);
+      panel.report({ title: 'Stopped. IRCTC says:', problems: [error] });
+      stop();
+      return;
+    }
+    if (!STEPS[flow.stage].ready()) return;
     busy = true;
     const current = flow;
     try {
@@ -415,8 +507,9 @@
     }
   }
 
-  // Saved settings, kept in step with the options page and the panel switch in other tabs.
-  const saved = { profile: null, armed: false };
+  // Saved settings, kept in step with the options page and the panel switches in other tabs. The switches are read
+  // when they're needed, so turning one off mid-run takes effect straight away.
+  const saved = { profile: null, armed: false, completePayment: false };
   const usable = (profile) => (profile?.passengers?.some((p) => p.name)
     ? { ...profile, passengers: profile.passengers.filter((p) => p.name) } : null);
 
@@ -433,7 +526,7 @@
   // The shortcut: handle whichever booking page is open, and carry on from there.
   function runHere() {
     if (busy) return;
-    const stage = ['payment', 'review', 'passenger'].find((s) => STEPS[s].ready());
+    const stage = ['wallet', 'payment', 'review', 'passenger'].find((s) => STEPS[s].ready());
     if (!stage) return panel.report({ title: 'Nothing to fill on this page' });
     if (!saved.profile) return panel.report({ title: 'No passengers saved', problems: ['Click "Edit passengers" to add them.'] });
     begin(stage);
@@ -446,7 +539,8 @@
     });
     return [
       `IRCTC Autofill ${VERSION} on ${location.pathname}, ${navigator.userAgent}`,
-      `switch ${saved.armed ? 'on' : 'off'}, ${saved.profile?.passengers.length ?? 0} passengers saved, payment "${saved.profile?.paymentOption ?? ''}"`,
+      `switch ${saved.armed ? 'on' : 'off'}, complete payment ${saved.completePayment ? 'on' : 'off'}, `
+        + `${saved.profile?.passengers.length ?? 0} passengers saved, payment "${saved.profile?.paymentOption ?? ''}"`,
       '--- last run', ...(trace.length ? trace : ['(none)']),
       ...boxes,
     ].join('\n');
@@ -473,6 +567,7 @@
         .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
           border-radius: 50%; background: #fff; transition: left .15s; }
         .switch input:checked { background: #16a34a; }
+        .switch input.pay:checked { background: #ea580c; }
         .switch input:checked::after { left: 21px; }
         .status { font-weight: 600; }
         .status.on { color: #15803d; }
@@ -497,6 +592,8 @@
         <header><span>IRCTC Autofill</span><button class="hide" title="Hide panel">–</button></header>
         <div class="body">
           <label class="switch"><input type="checkbox" class="armed"> Fill after Book Now</label>
+          <label class="switch" title="Presses Pay &amp; Book and CONFIRM, paying from your IRCTC eWallet">
+            <input type="checkbox" class="pay"> Complete payment (E-Wallet)</label>
           <div class="status"></div>
           <div class="wait" hidden></div>
           <ol class="names"></ol>
@@ -515,8 +612,13 @@
       list.append(line);
     });
 
-    function idle() {
+    function switches() {
       $('.armed').checked = saved.armed;
+      $('.pay').checked = saved.completePayment;
+    }
+
+    function idle() {
+      switches();
       $('.status').textContent = saved.armed ? 'On: waiting for you to click Book Now' : 'Off: turn on, then click Book Now';
       $('.status').className = `status${saved.armed ? ' on' : ''}`;
       $('.names').replaceChildren();
@@ -568,6 +670,10 @@
       $('.log').replaceChildren();
       idle();
     });
+    $('.pay').addEventListener('change', () => {
+      saved.completePayment = $('.pay').checked;
+      chrome.storage.local.set({ completePayment: saved.completePayment });
+    });
     $('.hide').addEventListener('click', () => show(false));
     $('.tab').addEventListener('click', () => show(true));
     $('.edit').addEventListener('click', () => globalThis.chrome?.runtime?.sendMessage?.({ type: 'options' }));
@@ -588,18 +694,21 @@
     });
 
     document.body.append(host);
-    return { idle, report, blocked, confirm, clearLog: () => $('.log').replaceChildren(), show };
+    return { idle, report, blocked, confirm, switches, clearLog: () => $('.log').replaceChildren(), show };
   })();
 
-  chrome.storage.local.get(['profile', 'armed']).then((stored) => {
+  chrome.storage.local.get(['profile', 'armed', 'completePayment']).then((stored) => {
     saved.profile = usable(stored.profile);
     saved.armed = !!stored.armed;
+    saved.completePayment = !!stored.completePayment;
     panel.idle();
   });
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area !== 'local') return;
     if (changes.profile) saved.profile = usable(changes.profile.newValue);
     if (changes.armed) saved.armed = !!changes.armed.newValue;
+    if (changes.completePayment) saved.completePayment = !!changes.completePayment.newValue;
+    panel.switches();
     if (!flow && !busy) panel.idle();
   });
 

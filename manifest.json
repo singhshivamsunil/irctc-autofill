@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "IRCTC Passenger Autofill",
-  "version": "0.3.0",
-  "description": "After you click Book Now, fills IRCTC's passenger page and gets you to payment. You type captchas and pay.",
+  "version": "0.4.0",
+  "description": "After you click Book Now, fills IRCTC's passenger page and gets you to payment. With Complete payment on, pays from your IRCTC eWallet.",
   "permissions": ["storage"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
