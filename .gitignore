@@ -1,0 +1,7 @@
+# Saved IRCTC pages and recordings: personal details (account, mobile, family names) and IRCTC's own scripts.
+manual_flow/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

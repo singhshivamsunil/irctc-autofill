@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock IRCTC booking flow</title>
+<style>
+  .ui-helper-hidden-accessible { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .ui-radiobutton-box { display: inline-block; width: 14px; height: 14px; border: 1px solid #888; }
+  /* IRCTC's css-checkbox: the input is hidden and its label draws the box. */
+  .css-checkbox { position: absolute; z-index: -1000; left: -1000px; overflow: hidden; clip: rect(0 0 0 0); height: 1px; width: 1px; margin: -1px; padding: 0; border: 0; }
+  .css-label_c::before { content: ""; display: inline-block; width: 14px; height: 14px; margin-right: 6px; border: 1px solid #888; vertical-align: middle; }
+  .css-checkbox:checked + .css-label_c::before { background: #1976d2; }
+  .ui-autocomplete-panel { border: 1px solid #888; }
+  .bank-type { border: 1px solid #ccc; margin: 4px; padding: 6px; cursor: pointer; }
+  .bank-type.active { background: #def; }
+</style>
+</head>
+<body>
+<!-- Local stand-in for IRCTC's train list → passenger → review → payment pages. The name box copies the saved page
+     in manual_flow/ and PrimeNG's AutoComplete as IRCTC's bundle uses it.
+     Scenarios: ?flow ?captcha ?slowlist ?prompt ?limit ?confirm ?waitlist ?notfound ?untrusted ?off -->
+<app-root><app-home><div id="view"></div></app-home></app-root>
+
+<template id="train-list">
+  <app-train-list><div>12345 MOCK EXPRESS · 3A
+    <app-train-avl-enq><div><div><span><span>
+      <button type="button" class="btnDefault">Refresh</button>
+      <button type="button" class="btnDefault" id="book-now">Book Now</button>
+    </span></span></div></div></app-train-avl-enq>
+  </div></app-train-list>
+</template>
+
+<template id="passenger-input">
+  <app-passenger-input><form>
+    <p-panel><div id="rows"></div><div id="add-area"></div></p-panel>
+    <!-- Other Preferences, as on the real page. IRCTC leaves out the confirm-berths box when the class is waitlisted. -->
+    <div class="col-xs-12">
+      <div class="col-md-6 col-sm-6 col-xs-12"><input type="checkbox" formcontrolname="autoUpgradationSelected" name="autoUpgradation"
+        id="autoUpgradation" class="css-checkbox"><label for="autoUpgradation" class="css-label_c t_cl">Consider for Auto Upgradation</label></div>
+      <div class="col-sm-6 col-xs-12" id="confirm-area"><input type="checkbox" formcontrolname="bookOnlyIfCnf" name="confirmberths"
+        id="confirmberths" class="css-checkbox"><label for="confirmberths" class="css-label_c t_cl">Book only if confirm berths are allotted.</label></div>
+    </div>
+    <div>
+      <p-radiobutton>
+        <div class="ui-radiobutton"><div class="ui-helper-hidden-accessible"><input type="radio" name="travelInsuranceOpted" value="false"></div><div class="ui-radiobutton-box"></div></div>
+        <label class="ui-radiobutton-label">No, I don’t want travel insurance</label>
+      </p-radiobutton>
+    </div>
+    <div><button type="button" class="train_Search btnDefault">Back</button><button type="button" class="train_Search btnDefault" id="psgn-continue">Continue</button></div>
+  </form></app-passenger-input>
+</template>
+
+<template id="passenger">
+  <app-passenger><div class="container-fluid"><div class="row"><div class="Layer_7 col-sm-3 col-xs-12">
+    <p-autocomplete formcontrolname="passengerName" field="masterPassengerName" size="24" maxlength="16">
+      <span class="ui-autocomplete ui-widget">
+        <input aria-autocomplete="list" role="searchbox" class="ui-inputtext ui-widget ui-autocomplete-input" autocomplete="off"
+          type="text" placeholder="Full Name as per Govt. ID" size="24" maxlength="16">
+      </span>
+    </p-autocomplete></div>
+    <div class="Layer_7 col-sm-1 col-xs-6"><input type="number" formcontrolname="passengerAge" class="form-control" placeholder="Age"></div>
+    <div class="Layer_7 col-sm-2 col-xs-6"><select formcontrolname="passengerGender" class="form-control">
+      <option value="">Gender</option><option value="M">Male</option><option value="F">Female</option><option value="T">Transgender</option>
+    </select></div>
+  </div></div></app-passenger>
+</template>
+
+<template id="review">
+  <app-review-booking><div><form>
+    <div id="captcha-area"><img alt="captcha"> <input type="text" id="captcha" formcontrolname="captcha" placeholder="Enter Captcha"></div>
+    <button type="button" class="train_Search">Back</button>
+    <button type="submit" class="train_Search">Continue</button>
+  </form></div></app-review-booking>
+</template>
+
+<template id="payment">
+  <app-payment-options><div><div><div><app-payment><div><div><form><div><span>
+    <div class="bank-type"><div>Multiple Payment Service</div></div>
+    <div class="bank-type"><div>BHIM/ UPI/ USSD</div></div>
+    <div class="bank-type"><div>E-Wallet (Instant Payment)</div></div>
+  </span></div></form></div></div></app-payment></div></div></div>
+  <button type="button" id="pay-book">Pay &amp; Book</button></app-payment-options>
+</template>
+
+<script>
+  const scenario = location.search.slice(1) || 'flow';
+  // Like the recording, one person's name is part of the others' names, so it must pick by the whole name.
+  const MASTER = [
+    { name: 'Ravi Kumar', age: 60, gender: 'Male' },
+    { name: 'Meena Ravi Kumar Verma', age: 35, gender: 'Female' },
+    { name: 'Asha Ravi Kumar Verma', age: 9, gender: 'Female' },
+    { name: 'Ravi Kumar Mohan Verma', age: 38, gender: 'Male' },
+  ];
+  const NAMES = { notfound: ['Ravi Kumar Mohan Verma', 'Sunil Verma'] };
+  const FAMILY = ['Ravi Kumar Mohan Verma', 'meena ravi kumar verma', 'Asha Ravi Kumar Verma'];
+  const profile = {
+    passengers: (NAMES[scenario] || FAMILY).map((name) => ({ name })),
+    paymentOption: 'E-Wallet',
+    confirmOnly: scenario === 'confirm' || scenario === 'waitlist',
+  };
+
+  // Stands in for the extension's storage API.
+  const stored = { profile, armed: scenario !== 'off' };
+  window.chrome = window.chrome || {};
+  chrome.storage = {
+    local: {
+      get: async () => ({ ...stored }),
+      set: async (values) => Object.assign(stored, values),
+    },
+    onChanged: { addListener() {} },
+  };
+
+  // Stand-in for Angular: the "model" only changes through the page's own handlers.
+  const model = { rows: [], choices: {}, timeline: {}, captcha: null, captchaError: false, payment: null, payClicked: false };
+  const mark = (key) => { model.timeline[key] ??= Math.round(performance.now()); };
+  const view = document.getElementById('view');
+  const render = (id) => view.replaceChildren(document.getElementById(id).content.cloneNode(true));
+
+  // ?slowlist: IRCTC hasn't loaded the master list yet for the first 1.5 s of the passenger page.
+  let masterList = null;
+
+  function showTrainList() {
+    render('train-list');
+    document.getElementById('book-now').addEventListener('click', () => {
+      mark('bookNow');
+      // ?prompt: a confirmation comes up first, and the passenger page only loads once it's answered.
+      if (scenario === 'prompt') showDialog(document.body, 'Confirmation', 'Do you want to continue?', () => setTimeout(showPassengers, 400));
+      else setTimeout(showPassengers, 400); // server round trip
+    });
+  }
+
+  // A PrimeNG dialog as IRCTC renders it: the p-dialog element is empty until it's shown.
+  function showDialog(parent, title, text, onOk) {
+    const dialog = document.createElement('p-dialog');
+    dialog.innerHTML = `<div class="ui-dialog ui-widget ui-widget-content" role="dialog"><div class="ui-dialog-titlebar">`
+      + `<span class="ui-dialog-title">${title}</span></div><div class="ui-dialog-content">${text}</div>`
+      + `<div class="ui-dialog-footer"><button type="button" class="dialog-ok">OK</button></div></div>`
+      + `<div class="ui-widget-overlay ui-dialog-mask"></div>`;
+    parent.append(dialog);
+    dialog.querySelector('.dialog-ok').addEventListener('click', () => {
+      dialog.replaceChildren();
+      onOk?.();
+    });
+  }
+
+  function showToast(summary, detail) {
+    const toast = document.createElement('p-toast');
+    toast.innerHTML = `<div class="ui-toast ui-toast-top-right"><div class="ui-toast-message ui-toast-message-error">`
+      + `<div class="ui-toast-summary">${summary}</div><div class="ui-toast-detail">${detail}</div></div></div>`;
+    document.body.append(toast);
+    setTimeout(() => toast.remove(), 5000);
+  }
+
+  function showPassengers() {
+    masterList = scenario === 'slowlist' ? null : MASTER;
+    if (scenario === 'slowlist') setTimeout(() => { masterList = MASTER; }, 1500);
+    render('passenger-input');
+    addRow();
+    // ?prompt: IRCTC's loading screen stays over the page for a moment.
+    if (scenario === 'prompt') {
+      const loading = document.createElement('div');
+      loading.className = 'my-loading';
+      loading.innerHTML = '<div class="dimmer"><div class="loading-bg"><div id="preloaderP"><div id="loaderP">Loading</div></div></div></div>';
+      document.body.append(loading);
+      setTimeout(() => { loading.remove(); mark('loaderGone'); }, 800);
+    }
+    // IRCTC's markup; like the real page, the link shows up a moment after the first name box.
+    setTimeout(() => {
+      document.getElementById('add-area').innerHTML = '<div class="zeroPadding pull-left"><a tabindex="0">'
+        + '<span class="prenext" id="add-passenger">+ Add Passenger</span><span class="prenext">/ Add Infant With Berth</span></a></div>';
+      document.getElementById('add-passenger').addEventListener('click', () => {
+        // ?limit: IRCTC's addPassenger() refuses past maxPassengers and shows an error toast instead.
+        if (scenario === 'limit' && model.rows.length >= 2) return showToast('Error', 'Maximum 2 passengers allowed.');
+        addRow(); // addPassenger() pushes the row and Angular draws it straight away
+      });
+    }, 300);
+    // ?waitlist: IRCTC leaves out the confirm-berths box (it's only shown when the class isn't waitlisted).
+    if (scenario === 'waitlist') document.getElementById('confirm-area').remove();
+    // Angular's checkbox value accessor listens for 'change'.
+    for (const box of view.querySelectorAll('.css-checkbox')) {
+      box.addEventListener('change', () => { model.choices[box.getAttribute('formcontrolname')] = box.checked; });
+    }
+    for (const widget of view.querySelectorAll('p-radiobutton')) {
+      const input = widget.querySelector('input');
+      const toggle = () => {
+        input.checked = input.type === 'radio' ? true : !input.checked;
+        model.choices[input.name] = input.type === 'radio' ? input.value : input.checked;
+      };
+      widget.querySelector('.ui-radiobutton-box').addEventListener('click', toggle);
+      widget.querySelector('label').addEventListener('click', toggle);
+    }
+    document.getElementById('psgn-continue').addEventListener('click', () => {
+      mark('passengerContinue');
+      setTimeout(showReview, 500);
+    });
+    mark('passengerShown');
+  }
+
+  // PrimeNG AutoComplete as IRCTC wires it: (onFocus) → handleDropdownClick, (completeMethod) → searchPassneger.
+  function addRow() {
+    const index = model.rows.length;
+    model.rows.push({});
+    const row = document.getElementById('passenger').content.firstElementChild.cloneNode(true);
+    const input = row.querySelector('.ui-autocomplete-input');
+    const wrapper = row.querySelector('.ui-autocomplete');
+    const listId = `pr_id_${7 + index}_list`;
+    input.setAttribute('aria-controls', listId);
+    input.setAttribute('aria-expanded', 'false');
+    let overlay = null;
+    let documentClickListener = null;
+
+    // Angular destroys the list's view at once, so its entries stop responding, but PrimeNG's leave animation
+    // keeps the panel on screen for another 100 ms.
+    const hide = () => {
+      if (documentClickListener) document.removeEventListener('click', documentClickListener);
+      documentClickListener = null;
+      if (!overlay) return;
+      const leaving = overlay;
+      overlay = null;
+      input.setAttribute('aria-expanded', 'false');
+      leaving.querySelectorAll('li').forEach((li) => li.replaceWith(li.cloneNode(true)));
+      setTimeout(() => leaving.remove(), 100);
+    };
+    // show() only opens the list while the box is the focused element.
+    const show = (results) => {
+      if (overlay || document.activeElement !== input) return;
+      overlay = document.createElement('div');
+      overlay.className = 'ui-autocomplete-panel ui-widget ui-widget-content';
+      input.setAttribute('aria-expanded', 'true');
+      const ul = document.createElement('ul');
+      ul.id = listId;
+      ul.setAttribute('role', 'listbox');
+      for (const entry of results) {
+        const li = document.createElement('li');
+        li.setAttribute('role', 'option');
+        li.className = 'ui-autocomplete-list-item ui-corner-all';
+        li.innerHTML = `<strong>${entry.name}</strong> | ${entry.age} yrs | ${entry.gender} `;
+        li.addEventListener('click', () => selectItem(entry));
+        ul.append(li);
+      }
+      overlay.append(ul);
+      wrapper.append(overlay);
+      // Bound when the show animation starts, a moment later.
+      Promise.resolve().then(() => {
+        documentClickListener = () => hide();
+        document.addEventListener('click', documentClickListener);
+      });
+    };
+    const search = (query) => {
+      const results = (masterList || []).filter((m) => m.name.toUpperCase().includes(query.toUpperCase()));
+      if (results.length) show(results);
+      else hide();
+    };
+    const selectItem = (entry) => {
+      input.value = entry.name;
+      // IRCTC's selectMstPsgns: name cut to 16 characters, age and gender from the master list.
+      input.value = entry.name.substring(0, 16);
+      row.querySelector('[formcontrolname=passengerAge]').value = entry.age;
+      row.querySelector('[formcontrolname=passengerGender]').value = entry.gender[0];
+      Object.assign(model.rows[index], { passengerName: input.value, passengerAge: String(entry.age), fromMasterList: true });
+      mark('firstPick');
+      input.focus();
+      // ?prompt: an information prompt after the second passenger, like IRCTC's messages for children.
+      if (scenario === 'prompt' && index === 1) showDialog(row, 'Information', 'Please check the berth choice.');
+    };
+    input.addEventListener('focus', () => {
+      if (overlay) hide();
+      else search('');
+    });
+    input.addEventListener('keydown', () => { model.keystrokes = (model.keystrokes || 0) + 1; });
+    document.getElementById('rows').append(row);
+  }
+
+  function showReview() {
+    render('review');
+    const captcha = document.getElementById('captcha');
+    if (scenario !== 'captcha') document.getElementById('captcha-area').remove();
+    view.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      mark('reviewContinue');
+      if (scenario === 'captcha') {
+        model.captcha = captcha.value;
+        if (!captcha.value) return void (model.captchaError = true);
+      }
+      setTimeout(showPayment, 400);
+    });
+    mark('reviewShown');
+  }
+
+  function showPayment() {
+    render('payment');
+    for (const tile of view.querySelectorAll('.bank-type')) {
+      tile.addEventListener('click', () => {
+        view.querySelectorAll('.bank-type').forEach((t) => t.classList.toggle('active', t === tile));
+        model.payment = tile.textContent.trim();
+        mark('paymentSelected');
+      });
+    }
+    document.getElementById('pay-book').addEventListener('click', () => { model.payClicked = true; });
+    mark('paymentShown');
+  }
+
+  showTrainList();
+  window.mock = { model, stored, ready: true };
+</script>
+<script src="../content.js"></script>
+</body>
+</html>

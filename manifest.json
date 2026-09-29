@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "IRCTC Passenger Autofill",
+  "version": "0.3.0",
+  "description": "After you click Book Now, fills IRCTC's passenger page and gets you to payment. You type captchas and pay.",
+  "permissions": ["storage"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.irctc.co.in/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "fill-passengers": {
+      "suggested_key": { "default": "Alt+Shift+F" },
+      "description": "Fill the IRCTC booking page that's open"
+    }
+  },
+  "action": { "default_title": "Show the IRCTC Autofill panel" },
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}

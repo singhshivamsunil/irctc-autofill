@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IRCTC Autofill Options</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+  body { max-width: 640px; margin: 24px auto; padding: 0 16px; }
+  input, button { font: inherit; }
+  input { width: 100%; padding: 4px 6px; box-sizing: border-box; }
+  fieldset { border: 1px solid #8886; border-radius: 8px; margin: 16px 0; padding: 12px 16px; }
+  input[type=checkbox] { width: auto; margin: 0; }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 14px; cursor: pointer; }
+  ol { padding-left: 24px; margin: 8px 0; }
+  li { margin: 6px 0; }
+  li > div { display: flex; gap: 8px; }
+  button { padding: 6px 14px; cursor: pointer; }
+  #status { margin-left: 12px; }
+  .error { color: #d33; }
+  .hint { opacity: .75; }
+</style>
+</head>
+<body>
+<h1>IRCTC passenger autofill</h1>
+<p class="hint">
+  Saved only in this browser. On IRCTC, turn on the switch in the IRCTC Autofill panel on the right of the page.
+  When you then click Book Now, this selects the passengers below from your master list, presses Continue, and
+  stops on the payment page. You type any captcha and you pay.
+</p>
+
+<fieldset>
+  <legend>Passengers, in booking order (max 6)</legend>
+  <p class="hint">Full name exactly as in your IRCTC master list. Capital letters don't matter.</p>
+  <ol id="passengers"></ol>
+  <button id="add" type="button">+ Add passenger</button>
+  <label class="check"><input type="checkbox" id="confirmOnly"> Book only if confirm berths are allotted</label>
+  <p class="hint">
+    Ticks this option on IRCTC's passenger page before pressing Continue. IRCTC only offers it when the class isn't
+    waitlisted; if it's missing, this stops before Continue so you can decide.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Payment page</legend>
+  <label for="paymentOption">Option to select</label>
+  <input id="paymentOption" placeholder="Leave blank to pick it yourself">
+  <p class="hint">
+    The start of the option's name as IRCTC shows it, for example E-Wallet. It selects the option and stops.
+    You press Pay &amp; Book.
+  </p>
+</fieldset>
+
+<button id="save" type="button">Save</button><span id="status" role="status"></span>
+
+<template id="passenger-row">
+  <li><div><input name="name" autocomplete="off"><button type="button" class="remove" title="Remove passenger">✕</button></div></li>
+</template>
+
+<script src="options.js"></script>
+</body>
+</html>
